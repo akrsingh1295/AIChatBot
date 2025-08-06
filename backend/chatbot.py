@@ -56,20 +56,20 @@ class ChatBot:
     def _setup_chains(self):
         """Set up conversation chains for different modes."""
         
-                 # General conversation chain (no knowledge base)
-         general_prompt = PromptTemplate(
-             input_variables=["history", "input"],
-             template="""You are a helpful AI assistant. Have a natural conversation with the user. Previous conversation: {history} Human: {input} Assistant:""")
-         
-         self.general_chain = ConversationChain(
-             llm=self.llm,
-             memory=self.memory,
-             prompt=general_prompt,
-             verbose=False
-         )
-         
-         # Knowledge-based conversation chain will be set up when needed
-         self.knowledge_chain = None
+        # General conversation chain (no knowledge base)
+        general_prompt = PromptTemplate(
+            input_variables=["history", "input"],
+            template="""You are a helpful AI assistant. Have a natural conversation with the user. Previous conversation: {history} Human: {input} Assistant:""")
+        
+        self.general_chain = ConversationChain(
+            llm=self.llm,
+            memory=self.memory,
+            prompt=general_prompt,
+            verbose=False
+        )
+        
+        # Knowledge-based conversation chain will be set up when needed
+        self.knowledge_chain = None
     
     def load_knowledge_base(self, file_paths: List[str]) -> bool:
         """Load knowledge base from files and set up retrieval chain."""
