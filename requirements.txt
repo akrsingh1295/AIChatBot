@@ -5,12 +5,18 @@ fastapi==0.116.1
 uvicorn==0.25.0
 python-multipart==0.0.20
 
+# Environment & Configuration
+python-dotenv==1.0.0
+
 # AI and ML Libraries
 langchain==0.0.344
 langchain-openai==0.0.2
 openai>=1.6.1
 huggingface-hub==0.19.4
 sentence-transformers==2.2.2
+
+# Multi-Language Support
+langdetect==1.0.9
 
 # Vector Database and Search
 chromadb==0.4.18

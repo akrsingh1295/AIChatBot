@@ -7,6 +7,7 @@ import os
 import tempfile
 from backend.chatbot import ChatBot
 from backend.content_filter import ContentFilter, ContentModerationLogger, BusinessContentFilter
+from backend.language_support import MultiLanguageSupport, MultilingualContentFilter
 from backend.middleware import (
     SecurityHeadersMiddleware,
     RateLimitMiddleware,
@@ -16,8 +17,10 @@ from backend.middleware import (
 
 app = FastAPI(title="ChatBot API", version="1.0.0")
 
-# Initialize content filtering system
+# Initialize content filtering and language support systems
 content_filter = None
+language_support = None
+multilingual_filter = None
 moderation_logger = ContentModerationLogger()
 
 # Security and monitoring middleware (order matters!)
@@ -58,12 +61,16 @@ class ChatResponse(BaseModel):
 
 @app.post("/initialize")
 async def initialize_chatbot(request: InitializeRequest, http_request: Request):
-    """Initialize the chatbot with OpenAI API key."""
-    global chatbot_instance, content_filter
+    """Initialize the chatbot with OpenAI API key and multi-language support."""
+    global chatbot_instance, content_filter, language_support, multilingual_filter
     
     try:
-        # Initialize content filter with the same API key
+        # Initialize multi-language support
+        language_support = MultiLanguageSupport(openai_api_key=request.api_key)
+        
+        # Initialize content filter with language support
         content_filter = BusinessContentFilter(openai_api_key=request.api_key)
+        multilingual_filter = MultilingualContentFilter(language_support)
         
         chatbot_instance = ChatBot(
             openai_api_key=request.api_key,
@@ -73,57 +80,90 @@ async def initialize_chatbot(request: InitializeRequest, http_request: Request):
         
         # Log successful initialization
         client_ip = http_request.client.host
-        moderation_logger.logger.info(f"Chatbot initialized successfully - IP: {client_ip}")
+        moderation_logger.logger.info(f"Chatbot initialized with multi-language support - IP: {client_ip}")
         
-        return {"success": True, "message": "Chatbot initialized successfully with content filtering enabled"}
+        # Get supported languages info
+        lang_info = language_support.get_supported_languages_info()
+        
+        return {
+            "success": True, 
+            "message": "Chatbot initialized successfully with multi-language support and content filtering",
+            "supported_languages": lang_info['total_languages'],
+            "auto_translate_enabled": True,
+            "rtl_support": len(lang_info['rtl_languages']) > 0
+        }
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to initialize chatbot: {str(e)}")
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat_with_bot(request: ChatRequest, http_request: Request):
-    """Send a message to the chatbot with content filtering."""
-    global chatbot_instance, content_filter
+    """Send a message to the chatbot with multi-language support and content filtering."""
+    global chatbot_instance, content_filter, language_support, multilingual_filter
     
     if not chatbot_instance:
         raise HTTPException(status_code=400, detail="Chatbot not initialized")
     
-    if not content_filter:
-        raise HTTPException(status_code=400, detail="Content filter not initialized")
+    if not content_filter or not language_support:
+        raise HTTPException(status_code=400, detail="Content filter or language support not initialized")
     
     # Get client IP for logging
     client_ip = http_request.client.host
     
     try:
-        # STEP 1: Check if the user's message is appropriate
-        is_safe, reason = content_filter.check_text_content(request.message)
+        # STEP 1: Process multi-language message
+        lang_analysis = language_support.process_multilingual_chat(request.message)
+        
+        # Log language detection
+        detected_lang = lang_analysis['detected_language']
+        lang_name = lang_analysis['language_info']['name']
+        moderation_logger.logger.info(f"LANGUAGE: {lang_name} ({detected_lang}) - Confidence: {lang_analysis['confidence']:.2f} - IP: {client_ip}")
+        
+        # STEP 2: Check content safety in detected language
+        if not lang_analysis['is_safe']:
+            moderation_logger.log_blocked_content("multilingual_message", lang_analysis['safety_reason'], client_ip)
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Message blocked by content filter: {lang_analysis['safety_reason']}"
+            )
+        
+        # STEP 3: Use English message for AI processing
+        english_message = lang_analysis['english_message']
+        
+        # STEP 4: Additional English content filtering
+        is_safe, reason = content_filter.check_text_content(english_message)
         if not is_safe:
-            moderation_logger.log_blocked_content("user_message", reason, client_ip)
+            moderation_logger.log_blocked_content("translated_message", reason, client_ip)
             raise HTTPException(
                 status_code=400, 
                 detail=f"Message blocked by content filter: {reason}"
             )
         
-        # STEP 2: Categorize and log the request
-        content_category = content_filter.get_content_category(request.message)
-        moderation_logger.logger.info(f"CHAT: {content_category} - IP: {client_ip}")
+        # STEP 5: Categorize and log the request
+        content_category = content_filter.get_content_category(english_message)
+        moderation_logger.logger.info(f"CHAT: {content_category} - {lang_name} - IP: {client_ip}")
         
-        # STEP 3: Switch mode if needed
+        # STEP 6: Switch mode if needed
         if chatbot_instance.current_mode != request.mode:
             chatbot_instance.switch_mode(request.mode)
         
-        # STEP 4: Get response from chatbot
-        response = chatbot_instance.chat(request.message)
+        # STEP 7: Get response from chatbot (using English message)
+        response = chatbot_instance.chat(english_message)
         
-        # STEP 5: Filter the AI response as well (safety check)
+        # STEP 8: Filter the AI response
         ai_response = response["response"]
         is_response_safe, response_reason = content_filter.check_text_content(ai_response)
         if not is_response_safe:
             moderation_logger.log_suspicious_activity("ai_response_blocked", response_reason, client_ip)
-            # Provide a safe fallback response
             ai_response = "I apologize, but I cannot provide that information. Please ask a different question."
         
+        # STEP 9: Translate response back to user's language if needed
+        final_response = ai_response
+        if detected_lang != 'en' and lang_analysis['language_info'].get('auto_translate', False):
+            final_response = language_support.process_multilingual_response(ai_response, detected_lang)
+            moderation_logger.logger.info(f"TRANSLATED_RESPONSE: {detected_lang} - IP: {client_ip}")
+        
         return ChatResponse(
-            response=ai_response,
+            response=final_response,
             mode=response["mode"],
             sources=response.get("sources", []),
             timestamp=response["timestamp"],
@@ -132,19 +172,19 @@ async def chat_with_bot(request: ChatRequest, http_request: Request):
     except HTTPException:
         raise  # Re-raise HTTP exceptions
     except Exception as e:
-        moderation_logger.log_suspicious_activity("chat_error", str(e), client_ip)
+        moderation_logger.log_suspicious_activity("multilingual_chat_error", str(e), client_ip)
         raise HTTPException(status_code=500, detail=f"Chat error: {str(e)}")
 
 @app.post("/load-knowledge")
 async def load_knowledge_base(files: List[UploadFile] = File(...), http_request: Request = None):
-    """Load knowledge base from uploaded files with content filtering."""
-    global chatbot_instance, content_filter
+    """Load knowledge base from uploaded files with multi-language support and content filtering."""
+    global chatbot_instance, content_filter, language_support
     
     if not chatbot_instance:
         raise HTTPException(status_code=400, detail="Chatbot not initialized")
     
-    if not content_filter:
-        raise HTTPException(status_code=400, detail="Content filter not initialized")
+    if not content_filter or not language_support:
+        raise HTTPException(status_code=400, detail="Content filter or language support not initialized")
     
     # Get client IP for logging
     client_ip = http_request.client.host if http_request else "unknown"
@@ -156,6 +196,7 @@ async def load_knowledge_base(files: List[UploadFile] = File(...), http_request:
         
         temp_files = []
         total_size = 0
+        processed_files_info = []
         
         for file in files:
             # Read file content
@@ -166,39 +207,71 @@ async def load_knowledge_base(files: List[UploadFile] = File(...), http_request:
             # Log file upload attempt
             moderation_logger.log_file_upload(file.filename, file_size, "processing", client_ip)
             
-            # STEP 1: Check file size and type
+            # STEP 1: Basic file validation
             is_file_safe, file_reason = content_filter.check_file_upload(file.filename, content)
             if not is_file_safe:
                 moderation_logger.log_blocked_content("file_upload", f"{file.filename}: {file_reason}", client_ip)
                 raise HTTPException(status_code=400, detail=f"File '{file.filename}' rejected: {file_reason}")
             
-            # STEP 2: Additional file content checks for knowledge base
+            # STEP 2: Process multi-language document content
             try:
                 text_content = content.decode('utf-8', errors='ignore')
-                is_content_safe, content_reason = content_filter.check_knowledge_base_content(text_content)
+                
+                # Analyze document language
+                doc_analysis = language_support.validate_document_language(text_content, file.filename)
+                
+                detected_lang = doc_analysis['detected_language']
+                lang_name = doc_analysis['language_info']['name']
+                
+                # Log document language
+                moderation_logger.logger.info(f"DOCUMENT_LANGUAGE: {file.filename} - {lang_name} ({detected_lang}) - Confidence: {doc_analysis['confidence']:.2f} - IP: {client_ip}")
+                
+                # Check content safety in detected language
+                if not doc_analysis['is_safe']:
+                    moderation_logger.log_blocked_content("multilingual_document", f"{file.filename}: {doc_analysis['safety_reason']}", client_ip)
+                    raise HTTPException(status_code=400, detail=f"File '{file.filename}' contains inappropriate content: {doc_analysis['safety_reason']}")
+                
+                # STEP 3: Use English content for knowledge base (translated if needed)
+                final_content = doc_analysis['english_content']
+                
+                # Additional safety check on English content
+                is_content_safe, content_reason = content_filter.check_knowledge_base_content(final_content)
                 if not is_content_safe:
-                    moderation_logger.log_blocked_content("knowledge_content", f"{file.filename}: {content_reason}", client_ip)
+                    moderation_logger.log_blocked_content("translated_document", f"{file.filename}: {content_reason}", client_ip)
                     raise HTTPException(status_code=400, detail=f"File '{file.filename}' contains inappropriate content: {content_reason}")
-            except Exception as e:
-                # If we can't decode as text, it might be binary - reject it
+                
+                processed_files_info.append({
+                    'filename': file.filename,
+                    'original_language': lang_name,
+                    'language_code': detected_lang,
+                    'translated': doc_analysis['needs_translation'],
+                    'original_size': doc_analysis['content_length'],
+                    'processed_size': doc_analysis['english_length']
+                })
+                
+            except UnicodeDecodeError as e:
                 moderation_logger.log_blocked_content("file_decode_error", f"{file.filename}: {str(e)}", client_ip)
+                raise HTTPException(status_code=400, detail=f"Could not process file '{file.filename}': Invalid text encoding")
+            except Exception as e:
+                moderation_logger.log_blocked_content("file_processing_error", f"{file.filename}: {str(e)}", client_ip)
                 raise HTTPException(status_code=400, detail=f"Could not process file '{file.filename}': {str(e)}")
             
-            # STEP 3: Sanitize filename and create temporary file
+            # STEP 4: Sanitize filename and create temporary file
             safe_filename = content_filter.sanitize_filename(file.filename)
             
             with tempfile.NamedTemporaryFile(mode="wb", delete=False, suffix=os.path.splitext(safe_filename)[1]) as temp_file:
-                temp_file.write(content)
+                # Write the processed (possibly translated) content
+                temp_file.write(final_content.encode('utf-8'))
                 temp_files.append(temp_file.name)
         
         # Check total upload size
         if total_size > 50 * 1024 * 1024:  # 50MB total limit
             raise HTTPException(status_code=400, detail="Total file size exceeds 50MB limit")
         
-        # STEP 4: Load knowledge base
+        # STEP 5: Load knowledge base with processed files
         success = chatbot_instance.load_knowledge_base(temp_files)
         
-        # STEP 5: Clean up temporary files
+        # STEP 6: Clean up temporary files
         for temp_file in temp_files:
             try:
                 os.unlink(temp_file)
@@ -206,12 +279,20 @@ async def load_knowledge_base(files: List[UploadFile] = File(...), http_request:
                 pass  # File might already be deleted
         
         if success:
-            moderation_logger.logger.info(f"Knowledge base loaded successfully - {len(files)} files - IP: {client_ip}")
+            # Log successful processing with language details
+            languages_processed = list(set(info['original_language'] for info in processed_files_info))
+            translated_count = sum(1 for info in processed_files_info if info['translated'])
+            
+            moderation_logger.logger.info(f"KNOWLEDGE_BASE_LOADED: {len(files)} files - Languages: {', '.join(languages_processed)} - {translated_count} translated - IP: {client_ip}")
+            
             return {
                 "success": True, 
                 "message": f"Successfully loaded {len(files)} files into knowledge base",
                 "files_processed": len(files),
-                "total_size_mb": round(total_size / (1024*1024), 2)
+                "total_size_mb": round(total_size / (1024*1024), 2),
+                "languages_detected": languages_processed,
+                "files_translated": translated_count,
+                "file_details": processed_files_info
             }
         else:
             raise HTTPException(status_code=500, detail="Failed to load knowledge base")
@@ -231,7 +312,7 @@ async def load_knowledge_base(files: List[UploadFile] = File(...), http_request:
                 os.unlink(temp_file)
             except OSError:
                 pass
-        moderation_logger.log_suspicious_activity("file_upload_error", str(e), client_ip)
+        moderation_logger.log_suspicious_activity("multilingual_file_upload_error", str(e), client_ip)
         raise HTTPException(status_code=500, detail=f"Upload error: {str(e)}")
 
 @app.post("/clear-memory")
