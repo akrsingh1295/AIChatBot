@@ -6,6 +6,8 @@ from typing import List, Optional
 import os
 import tempfile
 from backend.chatbot import ChatBot
+from backend.mcp_enhanced_chatbot import MCPEnhancedChatBot
+from backend.ai_agent_chatbot import AIAgentChatBot
 from backend.content_filter import ContentFilter, ContentModerationLogger, BusinessContentFilter
 from backend.language_support import MultiLanguageSupport, MultilingualContentFilter
 from backend.middleware import (
@@ -39,8 +41,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Global chatbot instance
+# Global chatbot instances
 chatbot_instance = None
+enhanced_chatbot_instance = None
+agent_chatbot_instance = None
 
 # Pydantic models
 class InitializeRequest(BaseModel):
@@ -51,6 +55,18 @@ class InitializeRequest(BaseModel):
 class ChatRequest(BaseModel):
     message: str
     mode: str = "general"
+    session_id: Optional[str] = "default"
+
+class EnhancedChatRequest(BaseModel):
+    message: str
+    session_id: Optional[str] = "default"
+    use_tools: bool = True
+
+class AgentChatRequest(BaseModel):
+    message: str
+    session_id: Optional[str] = "default"
+    use_agent: bool = True
+    preferred_agent: Optional[str] = None  # customer_support, data_analyst, research_agent, project_manager
 
 class ChatResponse(BaseModel):
     response: str
@@ -62,7 +78,7 @@ class ChatResponse(BaseModel):
 @app.post("/initialize")
 async def initialize_chatbot(request: InitializeRequest, http_request: Request):
     """Initialize the chatbot with OpenAI API key and multi-language support."""
-    global chatbot_instance, content_filter, language_support, multilingual_filter
+    global chatbot_instance, enhanced_chatbot_instance, content_filter, language_support, multilingual_filter
     
     try:
         # Initialize multi-language support
@@ -72,7 +88,20 @@ async def initialize_chatbot(request: InitializeRequest, http_request: Request):
         content_filter = BusinessContentFilter(openai_api_key=request.api_key)
         multilingual_filter = MultilingualContentFilter(language_support)
         
+        # Initialize both standard and enhanced chatbots
         chatbot_instance = ChatBot(
+            openai_api_key=request.api_key,
+            memory_window=request.memory_window,
+            temperature=request.temperature
+        )
+        
+        enhanced_chatbot_instance = MCPEnhancedChatBot(
+            openai_api_key=request.api_key,
+            memory_window=request.memory_window,
+            temperature=request.temperature
+        )
+        
+        agent_chatbot_instance = AIAgentChatBot(
             openai_api_key=request.api_key,
             memory_window=request.memory_window,
             temperature=request.temperature
@@ -80,17 +109,21 @@ async def initialize_chatbot(request: InitializeRequest, http_request: Request):
         
         # Log successful initialization
         client_ip = http_request.client.host
-        moderation_logger.logger.info(f"Chatbot initialized with multi-language support - IP: {client_ip}")
+        moderation_logger.logger.info(f"Chatbot initialized with multi-language support and MCP tools - IP: {client_ip}")
         
         # Get supported languages info
         lang_info = language_support.get_supported_languages_info()
         
         return {
             "success": True, 
-            "message": "Chatbot initialized successfully with multi-language support and content filtering",
+            "message": "Chatbot initialized successfully with multi-language support, content filtering, MCP tools, and AI Agents",
             "supported_languages": lang_info['total_languages'],
             "auto_translate_enabled": True,
-            "rtl_support": len(lang_info['rtl_languages']) > 0
+            "rtl_support": len(lang_info['rtl_languages']) > 0,
+            "mcp_tools_enabled": True,
+            "ai_agents_enabled": True,
+            "available_tools": enhanced_chatbot_instance.get_available_tools() if enhanced_chatbot_instance else [],
+            "available_agents": ["customer_support", "data_analyst", "research_agent", "project_manager", "task_planner"]
         }
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to initialize chatbot: {str(e)}")
@@ -174,6 +207,193 @@ async def chat_with_bot(request: ChatRequest, http_request: Request):
     except Exception as e:
         moderation_logger.log_suspicious_activity("multilingual_chat_error", str(e), client_ip)
         raise HTTPException(status_code=500, detail=f"Chat error: {str(e)}")
+
+@app.post("/chat/enhanced")
+async def enhanced_chat_with_bot(request: EnhancedChatRequest, http_request: Request):
+    """Send a message to the MCP-enhanced chatbot with tool capabilities."""
+    global enhanced_chatbot_instance, content_filter, language_support, multilingual_filter
+    
+    if not enhanced_chatbot_instance:
+        raise HTTPException(status_code=400, detail="Enhanced chatbot not initialized")
+    
+    if not content_filter or not language_support:
+        raise HTTPException(status_code=400, detail="Content filter or language support not initialized")
+    
+    # Get client IP for logging
+    client_ip = http_request.client.host
+    
+    try:
+        # STEP 1: Process multi-language message
+        lang_analysis = language_support.process_multilingual_chat(request.message)
+        
+        # Log language detection
+        detected_lang = lang_analysis['detected_language']
+        lang_name = lang_analysis['language_info']['name']
+        moderation_logger.logger.info(f"ENHANCED_CHAT_LANGUAGE: {lang_name} ({detected_lang}) - Confidence: {lang_analysis['confidence']:.2f} - IP: {client_ip}")
+        
+        # STEP 2: Check content safety in detected language
+        if not lang_analysis['is_safe']:
+            moderation_logger.log_blocked_content("multilingual_message", lang_analysis['safety_reason'], client_ip)
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Message blocked by content filter: {lang_analysis['safety_reason']}"
+            )
+        
+        # STEP 3: Use English message for AI processing
+        english_message = lang_analysis['english_message']
+        
+        # STEP 4: Additional English content filtering
+        is_safe, reason = content_filter.check_text_content(english_message)
+        if not is_safe:
+            moderation_logger.log_blocked_content("translated_message", reason, client_ip)
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Message blocked by content filter: {reason}"
+            )
+        
+        # STEP 5: Categorize and log the request
+        content_category = content_filter.get_content_category(english_message)
+        moderation_logger.logger.info(f"ENHANCED_CHAT: {content_category} - {lang_name} - IP: {client_ip}")
+        
+        # STEP 6: Get response from enhanced chatbot with tools
+        enhanced_response = await enhanced_chatbot_instance.chat_with_tools(
+            message=english_message,
+            session_id=request.session_id
+        )
+        
+        # STEP 7: Filter the AI response
+        ai_response = enhanced_response["response"]
+        is_response_safe, response_reason = content_filter.check_text_content(ai_response)
+        if not is_response_safe:
+            moderation_logger.log_suspicious_activity("ai_response_blocked", response_reason, client_ip)
+            ai_response = "I apologize, but I cannot provide that information. Please ask a different question."
+            enhanced_response["response"] = ai_response
+        
+        # STEP 8: Translate response back to user's language if needed
+        final_response = ai_response
+        if detected_lang != 'en' and lang_analysis['language_info'].get('auto_translate', False):
+            final_response = language_support.process_multilingual_response(ai_response, detected_lang)
+            moderation_logger.logger.info(f"ENHANCED_TRANSLATED_RESPONSE: {detected_lang} - IP: {client_ip}")
+            enhanced_response["response"] = final_response
+        
+        # Log tool usage if tools were used
+        if enhanced_response.get("enhanced", False):
+            tools_used = enhanced_response.get("tools_used", [])
+            moderation_logger.logger.info(f"MCP_TOOLS_USED: {', '.join(tools_used)} - {lang_name} - IP: {client_ip}")
+        
+        return {
+            "success": True,
+            "response": enhanced_response["response"],
+            "enhanced": enhanced_response.get("enhanced", False),
+            "tools_used": enhanced_response.get("tools_used", []),
+            "tool_results": enhanced_response.get("tool_results", {}),
+            "session_id": enhanced_response.get("session_id", request.session_id),
+            "timestamp": enhanced_response.get("timestamp"),
+            "language_detected": lang_name,
+            "language_code": detected_lang
+        }
+        
+    except HTTPException:
+        raise  # Re-raise HTTP exceptions
+    except Exception as e:
+        moderation_logger.log_suspicious_activity("enhanced_chat_error", str(e), client_ip)
+        raise HTTPException(status_code=500, detail=f"Enhanced chat error: {str(e)}")
+
+@app.post("/chat/agent")
+async def agent_chat_with_bot(request: AgentChatRequest, http_request: Request):
+    """Send a message to the AI Agent chatbot for intelligent multi-step problem solving."""
+    global agent_chatbot_instance, content_filter, language_support, multilingual_filter
+    
+    if not agent_chatbot_instance:
+        raise HTTPException(status_code=400, detail="AI Agent chatbot not initialized")
+    
+    if not content_filter or not language_support:
+        raise HTTPException(status_code=400, detail="Content filter or language support not initialized")
+    
+    # Get client IP for logging
+    client_ip = http_request.client.host
+    
+    try:
+        # STEP 1: Process multi-language message
+        lang_analysis = language_support.process_multilingual_chat(request.message)
+        
+        # Log language detection
+        detected_lang = lang_analysis['detected_language']
+        lang_name = lang_analysis['language_info']['name']
+        moderation_logger.logger.info(f"AGENT_CHAT_LANGUAGE: {lang_name} ({detected_lang}) - Confidence: {lang_analysis['confidence']:.2f} - IP: {client_ip}")
+        
+        # STEP 2: Check content safety in detected language
+        if not lang_analysis['is_safe']:
+            moderation_logger.log_blocked_content("multilingual_message", lang_analysis['safety_reason'], client_ip)
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Message blocked by content filter: {lang_analysis['safety_reason']}"
+            )
+        
+        # STEP 3: Use English message for AI processing
+        english_message = lang_analysis['english_message']
+        
+        # STEP 4: Additional English content filtering
+        is_safe, reason = content_filter.check_text_content(english_message)
+        if not is_safe:
+            moderation_logger.log_blocked_content("translated_message", reason, client_ip)
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Message blocked by content filter: {reason}"
+            )
+        
+        # STEP 5: Categorize and log the request
+        content_category = content_filter.get_content_category(english_message)
+        moderation_logger.logger.info(f"AGENT_CHAT: {content_category} - {lang_name} - IP: {client_ip}")
+        
+        # STEP 6: Get response from AI agent with intelligent planning
+        agent_response = await agent_chatbot_instance.chat_with_agent(
+            message=english_message,
+            session_id=request.session_id
+        )
+        
+        # STEP 7: Filter the AI response
+        ai_response = agent_response["response"]
+        is_response_safe, response_reason = content_filter.check_text_content(ai_response)
+        if not is_response_safe:
+            moderation_logger.log_suspicious_activity("ai_response_blocked", response_reason, client_ip)
+            ai_response = "I apologize, but I cannot provide that information. Please ask a different question."
+            agent_response["response"] = ai_response
+        
+        # STEP 8: Translate response back to user's language if needed
+        final_response = ai_response
+        if detected_lang != 'en' and lang_analysis['language_info'].get('auto_translate', False):
+            final_response = language_support.process_multilingual_response(ai_response, detected_lang)
+            moderation_logger.logger.info(f"AGENT_TRANSLATED_RESPONSE: {detected_lang} - IP: {client_ip}")
+            agent_response["response"] = final_response
+        
+        # Log agent usage
+        if agent_response.get("agent_used", False):
+            agent_role = agent_response.get("agent_role", "unknown")
+            steps_completed = agent_response.get("steps_completed", 0)
+            tools_used = agent_response.get("tools_used", [])
+            moderation_logger.logger.info(f"AI_AGENT_USED: {agent_role} - {steps_completed} steps - Tools: {', '.join(tools_used)} - {lang_name} - IP: {client_ip}")
+        
+        return {
+            "success": True,
+            "response": agent_response["response"],
+            "agent_used": agent_response.get("agent_used", False),
+            "agent_role": agent_response.get("agent_role", None),
+            "plan": agent_response.get("plan", {}),
+            "steps_completed": agent_response.get("steps_completed", 0),
+            "tools_used": agent_response.get("tools_used", []),
+            "execution_time": agent_response.get("execution_time", 0),
+            "session_id": agent_response.get("session_id", request.session_id),
+            "timestamp": agent_response.get("timestamp"),
+            "language_detected": lang_name,
+            "language_code": detected_lang
+        }
+        
+    except HTTPException:
+        raise  # Re-raise HTTP exceptions
+    except Exception as e:
+        moderation_logger.log_suspicious_activity("agent_chat_error", str(e), client_ip)
+        raise HTTPException(status_code=500, detail=f"AI Agent chat error: {str(e)}")
 
 @app.post("/load-knowledge")
 async def load_knowledge_base(files: List[UploadFile] = File(...), http_request: Request = None):
@@ -376,15 +596,104 @@ async def search_knowledge_base(request: ChatRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Search error: {str(e)}")
 
+@app.get("/tools/available")
+async def get_available_tools():
+    """Get list of available MCP tools."""
+    global enhanced_chatbot_instance
+    
+    if not enhanced_chatbot_instance:
+        raise HTTPException(status_code=400, detail="Enhanced chatbot not initialized")
+    
+    return {
+        "tools": enhanced_chatbot_instance.get_available_tools(),
+        "usage_stats": enhanced_chatbot_instance.get_tool_usage_stats()
+    }
+
+@app.get("/tools/usage-stats")
+async def get_tool_usage_stats():
+    """Get tool usage statistics."""
+    global enhanced_chatbot_instance
+    
+    if not enhanced_chatbot_instance:
+        raise HTTPException(status_code=400, detail="Enhanced chatbot not initialized")
+    
+    return {
+        "tool_usage_stats": enhanced_chatbot_instance.get_tool_usage_stats(),
+        "total_tool_calls": sum(enhanced_chatbot_instance.get_tool_usage_stats().values())
+    }
+
+@app.get("/agents/available")
+async def get_available_agents():
+    """Get list of available AI agents."""
+    global agent_chatbot_instance
+    
+    if not agent_chatbot_instance:
+        raise HTTPException(status_code=400, detail="AI Agent chatbot not initialized")
+    
+    return {
+        "agents": [
+            {
+                "name": "customer_support",
+                "description": "Handles customer service issues and complaints",
+                "capabilities": ["issue analysis", "resolution planning", "follow-up creation"]
+            },
+            {
+                "name": "data_analyst", 
+                "description": "Analyzes data and provides business insights",
+                "capabilities": ["data analysis", "trend identification", "recommendations"]
+            },
+            {
+                "name": "research_agent",
+                "description": "Conducts comprehensive research and information gathering",
+                "capabilities": ["web research", "competitive analysis", "report generation"]
+            },
+            {
+                "name": "project_manager",
+                "description": "Creates and manages project plans and timelines",
+                "capabilities": ["project planning", "timeline creation", "resource allocation"]
+            },
+            {
+                "name": "task_planner",
+                "description": "Plans and executes general multi-step tasks",
+                "capabilities": ["task breakdown", "execution planning", "workflow automation"]
+            }
+        ]
+    }
+
+@app.get("/agents/stats")
+async def get_agent_stats():
+    """Get AI agent performance statistics."""
+    global agent_chatbot_instance
+    
+    if not agent_chatbot_instance:
+        raise HTTPException(status_code=400, detail="AI Agent chatbot not initialized")
+    
+    return {
+        "agent_stats": agent_chatbot_instance.get_agent_stats(),
+        "message": "AI Agent performance metrics"
+    }
+
 @app.get("/")
 async def root():
     """API root endpoint."""
     return {
-        "message": "ChatBot API is running",
-        "version": "1.0.0",
+        "message": "ChatBot API is running with MCP Tools",
+        "version": "2.0.0",
+        "features": [
+            "Multi-language support",
+            "Content filtering",
+            "MCP tool integration",
+            "Real-time data access"
+        ],
         "endpoints": [
             "/initialize - Initialize chatbot with API key",
-            "/chat - Send message to chatbot",
+            "/chat - Send message to standard chatbot", 
+            "/chat/enhanced - Send message to MCP-enhanced chatbot with tools",
+            "/chat/agent - Send message to AI Agent for intelligent multi-step problem solving",
+            "/tools/available - Get list of available MCP tools",
+            "/tools/usage-stats - Get tool usage statistics",
+            "/agents/available - Get list of available AI agents",
+            "/agents/stats - Get AI agent performance statistics",
             "/load-knowledge - Upload knowledge base files",
             "/clear-memory - Clear conversation memory",
             "/status - Get chatbot status",

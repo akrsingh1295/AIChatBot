@@ -511,3 +511,131 @@
         border-color: #4a5568;
     }
 }
+
+/* Enhanced UI for MCP Tools and AI Agents */
+
+/* Agent selection dropdown */
+.agent-select {
+    width: 100%;
+    padding: 10px;
+    border: 2px solid #e2e8f0;
+    border-radius: 8px;
+    font-size: 14px;
+    background: white;
+    color: #4a5568;
+}
+
+.agent-select:focus {
+    border-color: #3182ce;
+    outline: none;
+    box-shadow: 0 0 0 3px rgba(49, 130, 206, 0.1);
+}
+
+/* Tools list display */
+.tools-list {
+    max-height: 150px;
+    overflow-y: auto;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    padding: 8px;
+    background: rgba(255, 255, 255, 0.9);
+}
+
+.tool-item {
+    padding: 6px 8px;
+    margin-bottom: 4px;
+    font-size: 12px;
+    background: rgba(66, 153, 225, 0.1);
+    border-radius: 4px;
+    border-left: 3px solid #3182ce;
+}
+
+/* Enhanced message information */
+.enhanced-info {
+    margin-top: 12px;
+    padding: 12px;
+    background: rgba(255, 193, 7, 0.1);
+    border-left: 4px solid #ffc107;
+    border-radius: 6px;
+}
+
+.enhanced-info h4 {
+    margin: 0 0 8px 0;
+    font-size: 14px;
+    color: #d69e2e;
+    font-weight: 600;
+}
+
+.tools-used {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.tool-badge {
+    display: inline-block;
+    padding: 4px 8px;
+    background: #ffc107;
+    color: #744210;
+    border-radius: 12px;
+    font-size: 11px;
+    font-weight: 500;
+}
+
+/* AI Agent information */
+.agent-info {
+    margin-top: 12px;
+    padding: 12px;
+    background: rgba(34, 197, 94, 0.1);
+    border-left: 4px solid #22c55e;
+    border-radius: 6px;
+}
+
+.agent-info h4 {
+    margin: 0 0 8px 0;
+    font-size: 14px;
+    color: #16a34a;
+    font-weight: 600;
+}
+
+.agent-details {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.agent-detail {
+    font-size: 12px;
+    color: #374151;
+}
+
+.agent-detail strong {
+    color: #16a34a;
+    font-weight: 600;
+}
+
+/* Radio group improvements */
+.radio-group {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.radio-group label {
+    display: flex !important;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 0 !important;
+    padding: 8px 12px;
+    border-radius: 6px;
+    transition: background-color 0.2s;
+    cursor: pointer;
+}
+
+.radio-group label:hover {
+    background: rgba(59, 130, 246, 0.05);
+}
+
+.radio-group input[type="radio"] {
+    margin: 0;
+}

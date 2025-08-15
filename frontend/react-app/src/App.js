@@ -10,6 +10,9 @@ function App() {
     const [apiKey, setApiKey] = useState('');
     const [knowledgeLoaded, setKnowledgeLoaded] = useState(false);
     const [chatbotReady, setChatbotReady] = useState(false);
+    const [availableTools, setAvailableTools] = useState([]);
+    const [availableAgents, setAvailableAgents] = useState([]);
+    const [selectedAgent, setSelectedAgent] = useState('');
     const messagesEndRef = useRef(null);
 
     const API_BASE_URL = 'http://localhost:8000';
@@ -29,9 +32,31 @@ function App() {
             });
             if (response.data.success) {
                 setChatbotReady(true);
+                
+                // Load available tools and agents
+                await loadAvailableTools();
+                await loadAvailableAgents();
             }
         } catch (error) {
             console.error('Failed to initialize chatbot:', error);
+        }
+    };
+
+    const loadAvailableTools = async () => {
+        try {
+            const response = await axios.get(`${API_BASE_URL}/tools/available`);
+            setAvailableTools(response.data.tools || []);
+        } catch (error) {
+            console.error('Failed to load tools:', error);
+        }
+    };
+
+    const loadAvailableAgents = async () => {
+        try {
+            const response = await axios.get(`${API_BASE_URL}/agents/available`);
+            setAvailableAgents(response.data.agents || []);
+        } catch (error) {
+            console.error('Failed to load agents:', error);
         }
     };
 
@@ -43,17 +68,39 @@ function App() {
         setLoading(true);
 
         try {
-            const response = await axios.post(`${API_BASE_URL}/chat`, {
-                message: input,
-                mode: mode
-            });
+            let response;
+            let endpoint = '/chat';
+            let requestData = { message: input };
+
+            // Determine which endpoint to use based on mode
+            if (mode === 'enhanced') {
+                endpoint = '/chat/enhanced';
+                requestData.session_id = 'frontend_session';
+            } else if (mode === 'agent') {
+                endpoint = '/chat/agent';
+                requestData.session_id = 'frontend_session';
+                if (selectedAgent) {
+                    requestData.preferred_agent = selectedAgent;
+                }
+            } else {
+                // Standard chat
+                requestData.mode = mode;
+            }
+
+            response = await axios.post(`${API_BASE_URL}${endpoint}`, requestData);
 
             const botMessage = {
                 type: 'assistant',
                 content: response.data.response,
-                mode: response.data.mode,
+                mode: mode,
                 sources: response.data.sources || [],
-                timestamp: new Date()
+                timestamp: new Date(),
+                // Enhanced response data
+                enhanced: response.data.enhanced || false,
+                tools_used: response.data.tools_used || [],
+                agent_used: response.data.agent_used || false,
+                agent_role: response.data.agent_role || null,
+                steps_completed: response.data.steps_completed || 0
             };
 
             setMessages(prev => [...prev, botMessage]);
@@ -139,7 +186,7 @@ function App() {
                                     checked={mode === 'general'}
                                     onChange={(e) => setMode(e.target.value)}
                                 />
-                                General
+                                🔵 Standard Chat
                             </label>
                             <label>
                                 <input
@@ -148,10 +195,59 @@ function App() {
                                     checked={mode === 'knowledge'}
                                     onChange={(e) => setMode(e.target.value)}
                                 />
-                                Knowledge
+                                📚 Knowledge Mode
+                            </label>
+                            <label>
+                                <input
+                                    type="radio"
+                                    value="enhanced"
+                                    checked={mode === 'enhanced'}
+                                    onChange={(e) => setMode(e.target.value)}
+                                />
+                                🟡 MCP Tools
+                            </label>
+                            <label>
+                                <input
+                                    type="radio"
+                                    value="agent"
+                                    checked={mode === 'agent'}
+                                    onChange={(e) => setMode(e.target.value)}
+                                />
+                                🟢 AI Agent
                             </label>
                         </div>
                     </div>
+
+                    {mode === 'agent' && availableAgents.length > 0 && (
+                        <div className="config-item">
+                            <label>🤖 Select AI Agent</label>
+                            <select 
+                                value={selectedAgent} 
+                                onChange={(e) => setSelectedAgent(e.target.value)}
+                                className="agent-select"
+                            >
+                                <option value="">Auto-select agent</option>
+                                {availableAgents.map((agent, index) => (
+                                    <option key={index} value={agent.name}>
+                                        {agent.name.replace('_', ' ').toUpperCase()} - {agent.description}
+                                    </option>
+                                ))}
+                            </select>
+                        </div>
+                    )}
+
+                    {mode === 'enhanced' && availableTools.length > 0 && (
+                        <div className="config-item">
+                            <label>🛠️ Available Tools</label>
+                            <div className="tools-list">
+                                {availableTools.map((tool, index) => (
+                                    <div key={index} className="tool-item">
+                                        <strong>{tool.name}</strong>: {tool.description}
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    )}
 
                     <div className="config-item">
                         <label>📚 Knowledge Base</label>
@@ -180,19 +276,31 @@ function App() {
             {/* Main Chat Area */}
             <div className="main-content">
                 <header className="header">
-                    <h1>🤖 Smart ChatBot with Memory & Knowledge Base</h1>
-                    <p>An intelligent chatbot powered by LangChain with conversation memory and document retrieval</p>
+                    <h1>🤖 AI ChatBot with MCP Tools & Intelligent Agents</h1>
+                    <p>Advanced AI assistant with real-time data access, multi-step problem solving, and business automation</p>
 
                     <div className="status-bar">
                         <div className={`status-item ${chatbotReady ? 'ready' : 'not-ready'}`}>
                             {chatbotReady ? '🟢 ChatBot Ready' : '🔴 ChatBot Not Ready'}
                         </div>
                         <div className="status-item">
-                            {mode === 'knowledge' ? '🟡' : '🔵'} Mode: {mode.charAt(0).toUpperCase() + mode.slice(1)}
+                            {mode === 'knowledge' ? '📚' : 
+                             mode === 'enhanced' ? '🟡' :
+                             mode === 'agent' ? '🟢' : '🔵'} Mode: {mode.charAt(0).toUpperCase() + mode.slice(1)}
                         </div>
                         <div className={`status-item ${knowledgeLoaded ? 'loaded' : 'not-loaded'}`}>
                             📚 Knowledge Base: {knowledgeLoaded ? '🟢 Loaded' : '🔴 Not Loaded'}
                         </div>
+                        {chatbotReady && (
+                            <>
+                                <div className="status-item">
+                                    🛠️ Tools: {availableTools.length} available
+                                </div>
+                                <div className="status-item">
+                                    🤖 Agents: {availableAgents.length} available
+                                </div>
+                            </>
+                        )}
                     </div>
                 </header>
 
@@ -204,7 +312,9 @@ function App() {
                                     <span className="message-sender">
                                         {message.type === 'user' ? '👤 You' :
                                             message.type === 'assistant' ?
-                                                `${message.mode === 'knowledge' ? '📚' : '🤖'} Assistant (${message.mode})` :
+                                                `${message.mode === 'knowledge' ? '📚' : 
+                                                    message.mode === 'enhanced' ? '🟡' :
+                                                    message.mode === 'agent' ? '🟢' : '🔵'} Assistant (${message.mode})` :
                                                 '❌ Error'}
                                     </span>
                                     <span className="message-time">
@@ -225,6 +335,38 @@ function App() {
                                                 </div>
                                             </details>
                                         ))}
+                                    </div>
+                                )}
+                                
+                                {/* Enhanced MCP Tools Information */}
+                                {message.enhanced && message.tools_used && message.tools_used.length > 0 && (
+                                    <div className="enhanced-info">
+                                        <h4>🛠️ Tools Used:</h4>
+                                        <div className="tools-used">
+                                            {message.tools_used.map((tool, idx) => (
+                                                <span key={idx} className="tool-badge">{tool}</span>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+                                
+                                {/* AI Agent Information */}
+                                {message.agent_used && (
+                                    <div className="agent-info">
+                                        <h4>🤖 AI Agent Details:</h4>
+                                        <div className="agent-details">
+                                            <div className="agent-detail">
+                                                <strong>Agent:</strong> {message.agent_role?.replace('_', ' ').toUpperCase()}
+                                            </div>
+                                            <div className="agent-detail">
+                                                <strong>Steps Completed:</strong> {message.steps_completed}
+                                            </div>
+                                            {message.tools_used && message.tools_used.length > 0 && (
+                                                <div className="agent-detail">
+                                                    <strong>Tools Used:</strong> {message.tools_used.join(', ')}
+                                                </div>
+                                            )}
+                                        </div>
                                     </div>
                                 )}
                             </div>
